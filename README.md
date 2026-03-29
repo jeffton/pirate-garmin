@@ -56,7 +56,7 @@ pip install 'pirate-garmin[browser]'
 playwright install chromium
 ```
 
-By default, a fresh login opens a headed browser window so Garmin gets a real browser/WebView-like runtime.
+By default, a fresh login now runs Chromium headlessly.
 Once `.garmin/native-oauth2.json` exists and refresh tokens are still valid, later commands reuse the cached session without browser automation.
 
 ## Credentials

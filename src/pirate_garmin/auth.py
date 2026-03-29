@@ -356,7 +356,7 @@ class AuthManager:
                 client_id=GARTH_CLIENT_ID,
                 service_url=GARTH_LOGIN_URL,
                 user_agent=MOBILE_SSO_USER_AGENT,
-                headless=False,
+                headless=True,
             )
         except BrowserLoginError as exc:
             raise GarminAuthError(str(exc)) from exc
