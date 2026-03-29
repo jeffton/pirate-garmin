@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import json
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -40,9 +40,6 @@ NATIVE_X_GARMIN_USER_AGENT = (
     "Android/33; Dalvik/2.1.0"
 )
 TOKEN_EXPIRY_SAFETY_SECONDS = 300
-FRESH_LOGIN_MIN_INTERVAL_SECONDS = 60
-FRESH_LOGIN_ERROR_COOLDOWN_SECONDS = 5 * 60
-FRESH_LOGIN_RATE_LIMIT_COOLDOWN_SECONDS = 30 * 60
 DEFAULT_TIMEOUT_SECONDS = 30.0
 
 
@@ -172,36 +169,6 @@ class NativeOAuth2Session:
 
 
 @dataclass(slots=True)
-class FreshLoginState:
-    last_attempt_at: str | None = None
-    last_success_at: str | None = None
-    block_until: str | None = None
-    last_status: int | None = None
-    last_error: str | None = None
-
-    @classmethod
-    def from_dict(cls, payload: dict[str, Any]) -> FreshLoginState:
-        return cls(
-            last_attempt_at=_optional_str(payload.get("lastAttemptAt")),
-            last_success_at=_optional_str(payload.get("lastSuccessAt")),
-            block_until=_optional_str(payload.get("blockUntil")),
-            last_status=int(payload["lastStatus"])
-            if payload.get("lastStatus") is not None
-            else None,
-            last_error=_optional_str(payload.get("lastError")),
-        )
-
-    def to_dict(self) -> dict[str, Any]:
-        return {
-            "lastAttemptAt": self.last_attempt_at,
-            "lastSuccessAt": self.last_success_at,
-            "blockUntil": self.block_until,
-            "lastStatus": self.last_status,
-            "lastError": self.last_error,
-        }
-
-
-@dataclass(slots=True)
 class ProfileBundle:
     social_profile: dict[str, Any] | None = None
     settings: dict[str, Any] | None = None
@@ -245,7 +212,6 @@ class AuthManager:
         self.app_dir = Path.cwd() / ".garmin" if app_dir is None else Path(app_dir)
         self.timeout = timeout
         self.native_oauth2_path = self.app_dir / "native-oauth2.json"
-        self.native_login_state_path = self.app_dir / "native-login-state.json"
         self.profile_path = self.app_dir / "profile.json"
 
     def ensure_app_dir(self) -> None:
@@ -259,15 +225,6 @@ class AuthManager:
     def save_native_session(self, session: NativeOAuth2Session) -> None:
         self.ensure_app_dir()
         self.native_oauth2_path.write_text(json.dumps(session.to_dict(), indent=2) + "\n")
-
-    def load_fresh_login_state(self) -> FreshLoginState | None:
-        if not self.native_login_state_path.exists():
-            return None
-        return FreshLoginState.from_dict(json.loads(self.native_login_state_path.read_text()))
-
-    def save_fresh_login_state(self, state: FreshLoginState) -> None:
-        self.ensure_app_dir()
-        self.native_login_state_path.write_text(json.dumps(state.to_dict(), indent=2) + "\n")
 
     def load_profile_bundle(self) -> ProfileBundle | None:
         if not self.profile_path.exists():
@@ -389,99 +346,83 @@ class AuthManager:
 
     def create_native_session(self) -> NativeOAuth2Session:
         credentials = self.require_credentials()
-        self.assert_fresh_login_allowed()
-        self.record_fresh_login_attempt()
-        failure_recorded = False
 
-        try:
-            with httpx.Client(follow_redirects=True, timeout=self.timeout) as client:
-                sign_in_url = httpx.URL(
-                    f"{MOBILE_SSO_BASE_URL}/mobile/sso/en_US/sign-in"
-                ).copy_merge_params({"clientId": GARTH_CLIENT_ID, "service": GARTH_LOGIN_URL})
-                sign_in_response = client.get(
-                    sign_in_url,
-                    headers=build_mobile_sso_headers(
-                        {
-                            "accept": (
-                                "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                            ),
-                            "sec-fetch-mode": "navigate",
-                            "sec-fetch-dest": "document",
-                            "sec-fetch-site": "none",
-                        }
-                    ),
-                )
-                self._raise_for_fresh_login_failure(sign_in_response, "Garmin mobile sign-in page")
+        with httpx.Client(follow_redirects=True, timeout=self.timeout) as client:
+            sign_in_url = httpx.URL(
+                f"{MOBILE_SSO_BASE_URL}/mobile/sso/en_US/sign-in"
+            ).copy_merge_params({"clientId": GARTH_CLIENT_ID, "service": GARTH_LOGIN_URL})
+            sign_in_response = client.get(
+                sign_in_url,
+                headers=build_mobile_sso_headers(
+                    {
+                        "accept": (
+                            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+                        ),
+                        "sec-fetch-mode": "navigate",
+                        "sec-fetch-dest": "document",
+                        "sec-fetch-site": "none",
+                    }
+                ),
+            )
+            self._raise_for_fresh_login_failure(sign_in_response, "Garmin mobile sign-in page")
 
-                check_login_url = httpx.URL(
-                    f"{MOBILE_SSO_BASE_URL}/mobile/api/checkLogin"
-                ).copy_merge_params(
-                    {"clientId": GARTH_CLIENT_ID, "locale": "en-US", "service": GARTH_LOGIN_URL}
-                )
-                check_login_response = client.get(
-                    check_login_url,
-                    headers=build_mobile_sso_headers(
-                        {
-                            "accept": "application/json,text/plain,*/*",
-                            "x-requested-with": "XMLHttpRequest",
-                        }
-                    ),
-                )
-                self._raise_for_fresh_login_failure(
-                    check_login_response, "Garmin mobile checkLogin"
-                )
+            check_login_url = httpx.URL(
+                f"{MOBILE_SSO_BASE_URL}/mobile/api/checkLogin"
+            ).copy_merge_params(
+                {"clientId": GARTH_CLIENT_ID, "locale": "en-US", "service": GARTH_LOGIN_URL}
+            )
+            check_login_response = client.get(
+                check_login_url,
+                headers=build_mobile_sso_headers(
+                    {
+                        "accept": "application/json,text/plain,*/*",
+                        "x-requested-with": "XMLHttpRequest",
+                    }
+                ),
+            )
+            self._raise_for_fresh_login_failure(check_login_response, "Garmin mobile checkLogin")
 
-                login_url = httpx.URL(f"{MOBILE_SSO_BASE_URL}/mobile/api/login").copy_merge_params(
-                    {"clientId": GARTH_CLIENT_ID, "locale": "en-US", "service": GARTH_LOGIN_URL}
-                )
-                login_response = client.post(
-                    login_url,
-                    headers=build_mobile_sso_headers(
-                        {
-                            "accept": "application/json,text/plain,*/*",
-                            "content-type": "application/json",
-                            "x-requested-with": "XMLHttpRequest",
-                        }
-                    ),
-                    json={
-                        "username": credentials.username,
-                        "password": credentials.password,
-                        "rememberMe": False,
-                        "captchaToken": "",
-                    },
-                )
-                self._raise_for_fresh_login_failure(login_response, "Garmin mobile login")
+            login_url = httpx.URL(f"{MOBILE_SSO_BASE_URL}/mobile/api/login").copy_merge_params(
+                {"clientId": GARTH_CLIENT_ID, "locale": "en-US", "service": GARTH_LOGIN_URL}
+            )
+            login_response = client.post(
+                login_url,
+                headers=build_mobile_sso_headers(
+                    {
+                        "accept": "application/json,text/plain,*/*",
+                        "content-type": "application/json",
+                        "x-requested-with": "XMLHttpRequest",
+                    }
+                ),
+                json={
+                    "username": credentials.username,
+                    "password": credentials.password,
+                    "rememberMe": False,
+                    "captchaToken": "",
+                },
+            )
+            self._raise_for_fresh_login_failure(login_response, "Garmin mobile login")
 
-                payload = login_response.json()
-                response_status = payload.get("responseStatus", {})
-                service_ticket = payload.get("serviceTicketId")
-                if response_status.get("type") != "SUCCESSFUL" or not service_ticket:
-                    self.record_fresh_login_failure(
-                        "Garmin mobile login was not successful: "
-                        f"{_safe_snippet(login_response.text)}"
-                    )
-                    failure_recorded = True
-                    raise GarminAuthError(f"Garmin mobile login failed: {login_response.text}")
+            payload = login_response.json()
+            response_status = payload.get("responseStatus", {})
+            service_ticket = payload.get("serviceTicketId")
+            if response_status.get("type") != "SUCCESSFUL" or not service_ticket:
+                raise GarminAuthError(f"Garmin mobile login failed: {login_response.text}")
 
-                self.record_fresh_login_success()
-                di_slot = self.exchange_service_ticket_for_di_token(
-                    client, str(service_ticket), DI_CLIENT_IDS
-                )
-                it_slot = self.exchange_di_token_for_it_token(
-                    di_slot.token.access_token, _it_client_id_candidates(di_slot.client_id)
-                )
-                session = NativeOAuth2Session(
-                    created_at=_utc_now_iso(),
-                    login_client_id=GARTH_CLIENT_ID,
-                    service_url=GARTH_LOGIN_URL,
-                    di=di_slot,
-                    it=it_slot,
-                )
-                return session
-        except Exception as exc:
-            if not failure_recorded:
-                self.record_fresh_login_failure(str(exc))
-            raise
+            di_slot = self.exchange_service_ticket_for_di_token(
+                client, str(service_ticket), DI_CLIENT_IDS
+            )
+            it_slot = self.exchange_di_token_for_it_token(
+                di_slot.token.access_token, _it_client_id_candidates(di_slot.client_id)
+            )
+            session = NativeOAuth2Session(
+                created_at=_utc_now_iso(),
+                login_client_id=GARTH_CLIENT_ID,
+                service_url=GARTH_LOGIN_URL,
+                di=di_slot,
+                it=it_slot,
+            )
+            return session
 
     def exchange_service_ticket_for_di_token(
         self,
@@ -676,79 +617,15 @@ class AuthManager:
     def require_credentials(self) -> Credentials:
         if self.credentials is None:
             raise MissingCredentialsError(
-                "Credentials are required for a fresh login. "
+                "Credentials are required for login. "
                 "Set GARMIN_USERNAME and GARMIN_PASSWORD or pass CLI options."
             )
         return self.credentials
 
-    def assert_fresh_login_allowed(self) -> None:
-        state = self.load_fresh_login_state()
-        if state is None:
-            return
-        if state.block_until and datetime.fromisoformat(state.block_until) > datetime.now(tz=UTC):
-            raise GarminAuthError(
-                "Fresh Garmin login is cooling down until "
-                f"{datetime.fromisoformat(state.block_until).astimezone(UTC).isoformat()}"
-            )
-        if state.last_attempt_at and (
-            datetime.now(tz=UTC) - datetime.fromisoformat(state.last_attempt_at)
-        ) < timedelta(seconds=FRESH_LOGIN_MIN_INTERVAL_SECONDS):
-            raise GarminAuthError(
-                "Fresh Garmin login was attempted very recently; refusing to immediately retry"
-            )
-
-    def record_fresh_login_attempt(self) -> None:
-        state = self.load_fresh_login_state() or FreshLoginState()
-        state.last_attempt_at = _utc_now_iso()
-        state.last_status = None
-        state.last_error = None
-        self.save_fresh_login_state(state)
-
-    def record_fresh_login_success(self) -> None:
-        now = _utc_now_iso()
-        self.save_fresh_login_state(
-            FreshLoginState(
-                last_attempt_at=now,
-                last_success_at=now,
-                block_until=None,
-                last_status=None,
-                last_error=None,
-            )
-        )
-
-    def record_fresh_login_failure(
-        self,
-        message: str,
-        status: int | None = None,
-        retry_after_seconds: int | None = None,
-    ) -> None:
-        cooldown_seconds = (
-            max(retry_after_seconds or 0, FRESH_LOGIN_RATE_LIMIT_COOLDOWN_SECONDS)
-            if status == 429
-            else FRESH_LOGIN_ERROR_COOLDOWN_SECONDS
-        )
-        self.save_fresh_login_state(
-            FreshLoginState(
-                last_attempt_at=_utc_now_iso(),
-                last_success_at=None,
-                block_until=_utc_at_offset_iso(cooldown_seconds),
-                last_status=status,
-                last_error=message,
-            )
-        )
-
     def _raise_for_fresh_login_failure(self, response: httpx.Response, context: str) -> None:
         if response.status_code == 429:
-            retry_after = _parse_retry_after_seconds(response)
-            self.record_fresh_login_failure(
-                f"{context} is rate limiting requests", 429, retry_after
-            )
             raise GarminAuthError(f"{context} returned 429")
         if not response.is_success:
-            self.record_fresh_login_failure(
-                f"{context} failed: {response.status_code} {_safe_snippet(response.text)}",
-                response.status_code,
-            )
             raise GarminAuthError(f"{context} failed: {response.status_code}")
 
 
@@ -791,29 +668,8 @@ def _utc_now_iso() -> str:
     return datetime.now(tz=UTC).isoformat()
 
 
-def _utc_at_offset_iso(seconds: int) -> str:
-    return (datetime.now(tz=UTC) + timedelta(seconds=seconds)).isoformat()
-
-
 def _safe_snippet(text: str, length: int = 240) -> str:
     return " ".join(text.split())[:length]
-
-
-def _parse_retry_after_seconds(response: httpx.Response) -> int | None:
-    raw = response.headers.get("retry-after")
-    if raw is None:
-        return None
-    try:
-        return max(0, int(raw))
-    except ValueError:
-        target = httpx.Headers({"date": raw}).get("date")
-        if target is None:
-            return None
-        try:
-            parsed = datetime.strptime(target, "%a, %d %b %Y %H:%M:%S %Z").replace(tzinfo=UTC)
-        except ValueError:
-            return None
-        return max(0, int((parsed - datetime.now(tz=UTC)).total_seconds()))
 
 
 def _token_needs_refresh(token: OAuth2Token) -> bool:

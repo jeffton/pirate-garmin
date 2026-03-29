@@ -34,10 +34,7 @@ The CLI implements this native flow:
 Cache files:
 
 - `.garmin/native-oauth2.json`
-- `.garmin/native-login-state.json`
 - `.garmin/profile.json`
-
-Fresh username/password login attempts are cooled down after failures to avoid hammering Garmin.
 
 ## Credentials
 
