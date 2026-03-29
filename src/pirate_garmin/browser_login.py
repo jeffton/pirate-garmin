@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlencode
@@ -97,8 +98,6 @@ def login_via_browser(
 
     timeout_ms = max(int(timeout * 1000), 1000)
     sign_in_url = build_sign_in_url(client_id, service_url)
-    login_api_prefix = f"{MOBILE_SSO_BASE_URL}/mobile/api/login"
-
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=headless)
         context = browser.new_context(
@@ -108,39 +107,32 @@ def login_via_browser(
             is_mobile=True,
             has_touch=True,
         )
+        captured_results: list[dict[str, Any]] = []
+        context.expose_binding(
+            "pirateGarminCaptureLogin",
+            lambda _source, payload: captured_results.append(payload),
+        )
         page = context.new_page()
+        page.add_init_script(_login_capture_init_script())
         try:
             try:
-                page.goto(sign_in_url, wait_until="domcontentloaded", timeout=timeout_ms)
+                page.goto(sign_in_url, wait_until="load", timeout=timeout_ms)
                 _fill_first(page, USERNAME_SELECTORS, username, timeout_ms, PlaywrightError)
                 _fill_first(page, PASSWORD_SELECTORS, password, timeout_ms, PlaywrightError)
+                _submit_login_form(page, timeout_ms, PlaywrightError)
                 try:
-                    with page.expect_response(
-                        lambda response: response.request.method == "POST"
-                        and response.url.startswith(login_api_prefix),
-                        timeout=timeout_ms,
-                    ) as response_info:
-                        _submit_login_form(page, timeout_ms, PlaywrightError)
+                    capture = _wait_for_captured_login_result(
+                        page,
+                        captured_results,
+                        timeout_ms,
+                        PlaywrightTimeoutError,
+                    )
                 except PlaywrightTimeoutError as exc:
                     raise BrowserLoginError(
-                        "Timed out waiting for Garmin mobile login response. "
+                        "Timed out waiting for Garmin mobile login result. "
                         f"Current page: {page.url}. Page snippet: {_page_snippet(page)}"
                     ) from exc
-
-                response = response_info.value
-                if not response.ok:
-                    raise BrowserLoginError(
-                        f"Garmin browser login failed with HTTP {response.status}: "
-                        f"{_safe_snippet(_response_text(response))}"
-                    )
-                try:
-                    payload = response.json()
-                except Exception as exc:
-                    raise BrowserLoginError(
-                        "Garmin browser login returned a non-JSON response: "
-                        f"{_safe_snippet(_response_text(response))}"
-                    ) from exc
-                return parse_login_response_payload(payload)
+                return _parse_captured_login_result(capture)
             except PlaywrightError as exc:
                 raise BrowserLoginError(f"Garmin browser login automation failed: {exc}") from exc
         finally:
@@ -190,22 +182,136 @@ def _first_visible_locator(
     timeout_ms: int,
     playwright_error: type[Exception],
 ) -> Any | None:
-    probe_timeout_ms = min(timeout_ms, 1500)
-    for selector in selectors:
-        locator = page.locator(selector).first
-        try:
-            locator.wait_for(state="visible", timeout=probe_timeout_ms)
-        except playwright_error:
-            continue
-        return locator
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        for selector in selectors:
+            locator = page.locator(selector).first
+            try:
+                locator.wait_for(state="visible", timeout=750)
+            except playwright_error:
+                continue
+            return locator
     return None
 
 
-def _response_text(response: Any) -> str:
-    try:
-        return str(response.text())
-    except Exception:
-        return ""
+def _wait_for_captured_login_result(
+    page: Any,
+    captured_results: list[dict[str, Any]],
+    timeout_ms: int,
+    playwright_timeout_error: type[Exception],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + (timeout_ms / 1000)
+    while time.monotonic() < deadline:
+        if captured_results:
+            return captured_results[-1]
+        page.wait_for_timeout(200)
+    raise playwright_timeout_error("Timed out waiting for captured Garmin login result")
+
+
+def _parse_captured_login_result(capture: Any) -> FreshLoginResult:
+    if not isinstance(capture, dict):
+        raise BrowserLoginError("Garmin browser login did not produce a capturable result")
+
+    status = capture.get("status")
+    response_text = str(capture.get("text") or "")
+    payload = capture.get("payload")
+    if status is not None and int(status) >= 400:
+        raise BrowserLoginError(
+            f"Garmin browser login failed with HTTP {status}: {_safe_snippet(response_text)}"
+        )
+    if isinstance(payload, dict):
+        return parse_login_response_payload(payload)
+    if response_text:
+        raise BrowserLoginError(
+            "Garmin browser login returned a non-JSON response: "
+            f"{_safe_snippet(response_text)}"
+        )
+    raise BrowserLoginError("Garmin browser login returned an empty response")
+
+
+def _login_capture_init_script() -> str:
+    return """
+(() => {
+  if (window.__pirateGarminLoginHookInstalled) {
+    return;
+  }
+  window.__pirateGarminLoginHookInstalled = true;
+
+  const isLoginUrl = (url) => String(url || '').includes('/mobile/api/login');
+  const setCapture = (status, url, text) => {
+    let payload = null;
+    if (typeof text === 'string' && text.length > 0) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = null;
+      }
+    }
+    window.__pirateGarminLoginCapture = {
+      status,
+      url: String(url || ''),
+      text: String(text || ''),
+      payload,
+    };
+    if (typeof window.pirateGarminCaptureLogin === 'function') {
+      void window.pirateGarminCaptureLogin(window.__pirateGarminLoginCapture);
+    }
+  };
+
+  const originalFetch = window.fetch;
+  window.fetch = async (...args) => {
+    const response = await originalFetch(...args);
+    try {
+      const resource = args[0];
+      const url = typeof resource === 'string' ? resource : resource && resource.url;
+      if (isLoginUrl(url)) {
+        const text = await response.clone().text();
+        setCapture(response.status, url, text);
+      }
+    } catch (error) {
+      window.__pirateGarminLoginCapture = {
+        status: 599,
+        url: '',
+        text: String(error),
+        payload: null,
+      };
+      if (typeof window.pirateGarminCaptureLogin === 'function') {
+        void window.pirateGarminCaptureLogin(window.__pirateGarminLoginCapture);
+      }
+    }
+    return response;
+  };
+
+  const originalOpen = XMLHttpRequest.prototype.open;
+  const originalSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__pirateGarminUrl = String(url || '');
+    return originalOpen.call(this, method, url, ...rest);
+  };
+
+  XMLHttpRequest.prototype.send = function(...args) {
+    this.addEventListener('loadend', function() {
+      try {
+        if (isLoginUrl(this.__pirateGarminUrl)) {
+          setCapture(this.status, this.__pirateGarminUrl, this.responseText || '');
+        }
+      } catch (error) {
+        window.__pirateGarminLoginCapture = {
+          status: 599,
+          url: this.__pirateGarminUrl || '',
+          text: String(error),
+          payload: null,
+        };
+        if (typeof window.pirateGarminCaptureLogin === 'function') {
+          void window.pirateGarminCaptureLogin(window.__pirateGarminLoginCapture);
+        }
+      }
+    }, { once: true });
+    return originalSend.apply(this, args);
+  };
+})();
+"""
 
 
 def _page_snippet(page: Any) -> str:
