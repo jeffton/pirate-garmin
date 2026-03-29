@@ -9,7 +9,7 @@ This repo is intentionally a thin wrapper:
 - `hatchling` as the build backend
 - `httpx` for HTTP
 - `typer` for the CLI
-- native Garmin auth with cached DI + IT OAuth2 tokens
+- browser-bootstrapped Garmin auth with cached DI + IT OAuth2 tokens
 - raw Garmin JSON payloads back out, with as little reshaping as possible
 
 ## What is implemented
@@ -23,18 +23,41 @@ This repo is intentionally a thin wrapper:
 
 ## Auth flow
 
-The CLI implements this native flow:
+The CLI implements this flow:
 
-1. mobile SSO login via `GCM_ANDROID_DARK`
-2. service ticket -> DI OAuth2
-3. DI OAuth2 -> IT OAuth2
-4. cache both token families locally
-5. refresh cached tokens whenever possible on later runs
+1. fresh login in a real browser via Garmin mobile SSO and `GCM_ANDROID_DARK`
+2. capture the returned service ticket
+3. service ticket -> DI OAuth2
+4. DI OAuth2 -> IT OAuth2
+5. cache both token families locally
+6. refresh cached tokens whenever possible on later runs without reopening the browser
 
 Cache files:
 
 - `.garmin/native-oauth2.json`
 - `.garmin/profile.json`
+
+## Browser requirement for fresh login
+
+Fresh username/password login now uses Playwright and a real Chromium runtime.
+The browser support stays optional, because cached token refresh does not need it.
+
+Install it when you need a true fresh login:
+
+```bash
+uv sync --extra browser --extra dev
+uv run playwright install chromium
+```
+
+Or with pip:
+
+```bash
+pip install 'pirate-garmin[browser]'
+playwright install chromium
+```
+
+By default, a fresh login opens a headed browser window so Garmin gets a real browser/WebView-like runtime.
+Once `.garmin/native-oauth2.json` exists and refresh tokens are still valid, later commands reuse the cached session without browser automation.
 
 ## Credentials
 
@@ -50,6 +73,7 @@ pirate-garmin login --username you@example.com --password 'secret'
 ```
 
 Even if credentials are passed every time, the CLI will still reuse cached tokens first.
+If no refreshable tokens are cached, the CLI falls back to browser-based fresh login.
 
 ## Install / run
 
@@ -60,12 +84,21 @@ uv sync --extra dev
 uv run pirate-garmin version
 ```
 
+For fresh login support too:
+
+```bash
+uv sync --extra dev --extra browser
+uv run playwright install chromium
+```
+
 ### Build / install
 
 ```bash
 uv build
 uv tool install .
 ```
+
+For browser-backed fresh login with pip/uv installs, also install the optional `browser` extra and Playwright Chromium.
 
 ## Commands
 

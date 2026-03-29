@@ -9,6 +9,8 @@ from typing import Any
 
 import httpx
 
+from pirate_garmin.browser_login import BrowserLoginError, login_via_browser
+
 GARTH_CLIENT_ID = "GCM_ANDROID_DARK"
 GARTH_LOGIN_URL = "https://mobile.integration.garmin.com/gcm/android"
 MOBILE_SSO_BASE_URL = "https://sso.garmin.com"
@@ -346,83 +348,33 @@ class AuthManager:
 
     def create_native_session(self) -> NativeOAuth2Session:
         credentials = self.require_credentials()
+        try:
+            fresh = login_via_browser(
+                username=credentials.username,
+                password=credentials.password,
+                timeout=self.timeout,
+                client_id=GARTH_CLIENT_ID,
+                service_url=GARTH_LOGIN_URL,
+                user_agent=MOBILE_SSO_USER_AGENT,
+                headless=False,
+            )
+        except BrowserLoginError as exc:
+            raise GarminAuthError(str(exc)) from exc
 
         with httpx.Client(follow_redirects=True, timeout=self.timeout) as client:
-            sign_in_url = httpx.URL(
-                f"{MOBILE_SSO_BASE_URL}/mobile/sso/en_US/sign-in"
-            ).copy_merge_params({"clientId": GARTH_CLIENT_ID, "service": GARTH_LOGIN_URL})
-            sign_in_response = client.get(
-                sign_in_url,
-                headers=build_mobile_sso_headers(
-                    {
-                        "accept": (
-                            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-                        ),
-                        "sec-fetch-mode": "navigate",
-                        "sec-fetch-dest": "document",
-                        "sec-fetch-site": "none",
-                    }
-                ),
-            )
-            self._raise_for_fresh_login_failure(sign_in_response, "Garmin mobile sign-in page")
-
-            check_login_url = httpx.URL(
-                f"{MOBILE_SSO_BASE_URL}/mobile/api/checkLogin"
-            ).copy_merge_params(
-                {"clientId": GARTH_CLIENT_ID, "locale": "en-US", "service": GARTH_LOGIN_URL}
-            )
-            check_login_response = client.get(
-                check_login_url,
-                headers=build_mobile_sso_headers(
-                    {
-                        "accept": "application/json,text/plain,*/*",
-                        "x-requested-with": "XMLHttpRequest",
-                    }
-                ),
-            )
-            self._raise_for_fresh_login_failure(check_login_response, "Garmin mobile checkLogin")
-
-            login_url = httpx.URL(f"{MOBILE_SSO_BASE_URL}/mobile/api/login").copy_merge_params(
-                {"clientId": GARTH_CLIENT_ID, "locale": "en-US", "service": GARTH_LOGIN_URL}
-            )
-            login_response = client.post(
-                login_url,
-                headers=build_mobile_sso_headers(
-                    {
-                        "accept": "application/json,text/plain,*/*",
-                        "content-type": "application/json",
-                        "x-requested-with": "XMLHttpRequest",
-                    }
-                ),
-                json={
-                    "username": credentials.username,
-                    "password": credentials.password,
-                    "rememberMe": False,
-                    "captchaToken": "",
-                },
-            )
-            self._raise_for_fresh_login_failure(login_response, "Garmin mobile login")
-
-            payload = login_response.json()
-            response_status = payload.get("responseStatus", {})
-            service_ticket = payload.get("serviceTicketId")
-            if response_status.get("type") != "SUCCESSFUL" or not service_ticket:
-                raise GarminAuthError(f"Garmin mobile login failed: {login_response.text}")
-
             di_slot = self.exchange_service_ticket_for_di_token(
-                client, str(service_ticket), DI_CLIENT_IDS
+                client, fresh.service_ticket, DI_CLIENT_IDS
             )
-            it_slot = self.exchange_di_token_for_it_token(
-                di_slot.token.access_token, _it_client_id_candidates(di_slot.client_id)
-            )
-            session = NativeOAuth2Session(
-                created_at=_utc_now_iso(),
-                login_client_id=GARTH_CLIENT_ID,
-                service_url=GARTH_LOGIN_URL,
-                di=di_slot,
-                it=it_slot,
-            )
-            return session
+        it_slot = self.exchange_di_token_for_it_token(
+            di_slot.token.access_token, _it_client_id_candidates(di_slot.client_id)
+        )
+        return NativeOAuth2Session(
+            created_at=_utc_now_iso(),
+            login_client_id=GARTH_CLIENT_ID,
+            service_url=GARTH_LOGIN_URL,
+            di=di_slot,
+            it=it_slot,
+        )
 
     def exchange_service_ticket_for_di_token(
         self,
@@ -621,13 +573,6 @@ class AuthManager:
                 "Set GARMIN_USERNAME and GARMIN_PASSWORD or pass CLI options."
             )
         return self.credentials
-
-    def _raise_for_fresh_login_failure(self, response: httpx.Response, context: str) -> None:
-        if response.status_code == 429:
-            raise GarminAuthError(f"{context} returned 429")
-        if not response.is_success:
-            raise GarminAuthError(f"{context} failed: {response.status_code}")
-
 
 def build_mobile_sso_headers(extra: dict[str, str] | None = None) -> dict[str, str]:
     headers = {

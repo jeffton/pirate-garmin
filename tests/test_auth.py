@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import json
 
+import httpx
+
 from pirate_garmin.auth import (
     CONNECT_API_BASE_URL,
     DI_TOKEN_URL,
@@ -13,6 +15,7 @@ from pirate_garmin.auth import (
     NativeTokenSlot,
     OAuth2Token,
 )
+from pirate_garmin.browser_login import FreshLoginResult
 from pirate_garmin.client import GarminClient
 
 
@@ -32,32 +35,26 @@ def _oauth_payload(access_token: str, refresh_token: str) -> dict[str, object]:
     }
 
 
-def test_native_login_bootstrap_saves_di_and_it_tokens(httpx_mock, tmp_path):
+def test_native_login_bootstrap_saves_di_and_it_tokens(httpx_mock, monkeypatch, tmp_path):
     manager = AuthManager(credentials=Credentials("user", "pass"), app_dir=tmp_path)
+    monkeypatch.setattr(
+        "pirate_garmin.auth.login_via_browser",
+        lambda **_: FreshLoginResult(service_ticket="ticket-123"),
+    )
 
-    httpx_mock.add_response(
-        method="GET",
-        url="https://sso.garmin.com/mobile/sso/en_US/sign-in?clientId=GCM_ANDROID_DARK&service=https%3A%2F%2Fmobile.integration.garmin.com%2Fgcm%2Fandroid",
-        text="ok",
-    )
-    httpx_mock.add_response(
-        method="GET",
-        url="https://sso.garmin.com/mobile/api/checkLogin?clientId=GCM_ANDROID_DARK&locale=en-US&service=https%3A%2F%2Fmobile.integration.garmin.com%2Fgcm%2Fandroid",
-        json={"ok": True},
-    )
-    httpx_mock.add_response(
-        method="POST",
-        url="https://sso.garmin.com/mobile/api/login?clientId=GCM_ANDROID_DARK&locale=en-US&service=https%3A%2F%2Fmobile.integration.garmin.com%2Fgcm%2Fandroid",
-        json={"responseStatus": {"type": "SUCCESSFUL"}, "serviceTicketId": "ticket-123"},
-    )
-    httpx_mock.add_response(
-        method="POST",
-        url=DI_TOKEN_URL,
-        json=_oauth_payload(
-            _jwt({"client_id": "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"}),
-            "di-refresh",
-        ),
-    )
+    captured: dict[str, str] = {}
+
+    def di_callback(request: httpx.Request) -> httpx.Response:
+        captured["body"] = request.content.decode()
+        return httpx.Response(
+            200,
+            json=_oauth_payload(
+                _jwt({"client_id": "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"}),
+                "di-refresh",
+            ),
+        )
+
+    httpx_mock.add_callback(di_callback, method="POST", url=DI_TOKEN_URL)
     httpx_mock.add_response(
         method="POST",
         url=f"{IT_TOKEN_URL}?grant_type=connect2_exchange",
@@ -66,6 +63,7 @@ def test_native_login_bootstrap_saves_di_and_it_tokens(httpx_mock, tmp_path):
 
     session = manager.ensure_authenticated()
 
+    assert "service_ticket=ticket-123" in captured["body"]
     assert session.di.client_id == "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
     assert session.it.client_id == "GARMIN_CONNECT_MOBILE_ANDROID_2025Q2"
     assert manager.native_oauth2_path.exists()
