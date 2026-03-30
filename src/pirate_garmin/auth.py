@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -203,6 +204,16 @@ class ProfileBundle:
         return str(value) if value else None
 
 
+def default_app_dir() -> Path:
+    configured = os.environ.get("PIRATE_GARMIN_APP_DIR")
+    if configured:
+        return Path(configured).expanduser()
+    xdg_data_home = os.environ.get("XDG_DATA_HOME")
+    if xdg_data_home:
+        return Path(xdg_data_home).expanduser() / "pirate-garmin"
+    return Path.home() / ".local" / "share" / "pirate-garmin"
+
+
 class AuthManager:
     def __init__(
         self,
@@ -211,7 +222,7 @@ class AuthManager:
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.credentials = credentials
-        self.app_dir = Path.cwd() / ".garmin" if app_dir is None else Path(app_dir)
+        self.app_dir = default_app_dir() if app_dir is None else Path(app_dir)
         self.timeout = timeout
         self.native_oauth2_path = self.app_dir / "native-oauth2.json"
         self.profile_path = self.app_dir / "profile.json"

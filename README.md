@@ -32,10 +32,12 @@ The CLI implements this flow:
 5. cache both token families locally
 6. refresh cached tokens whenever possible on later runs without reopening the browser
 
-Cache files:
+Cache files live in the user app data directory by default:
 
-- `.garmin/native-oauth2.json`
-- `.garmin/profile.json`
+- `~/.local/share/pirate-garmin/native-oauth2.json`
+- `~/.local/share/pirate-garmin/profile.json`
+
+You can override that location with `PIRATE_GARMIN_APP_DIR` or per command with `--app-dir`.
 
 ## Browser requirement for fresh login
 
@@ -57,7 +59,7 @@ playwright install chromium
 ```
 
 By default, a fresh login now runs Chromium headlessly.
-Once `.garmin/native-oauth2.json` exists and refresh tokens are still valid, later commands reuse the cached session without browser automation.
+Once `~/.local/share/pirate-garmin/native-oauth2.json` exists and refresh tokens are still valid, later commands reuse the cached session without browser automation.
 
 ## Credentials
 
@@ -95,10 +97,18 @@ uv run playwright install chromium
 
 ```bash
 uv build
-uv tool install .
+uv tool install dist/pirate_garmin-*.whl
 ```
 
 For browser-backed fresh login with pip/uv installs, also install the optional `browser` extra and Playwright Chromium.
+
+If you already have repo-local auth from old test runs, migrate it once:
+
+```bash
+mkdir -p ~/.local/share/pirate-garmin
+cp .garmin/native-oauth2.json ~/.local/share/pirate-garmin/
+cp .garmin/profile.json ~/.local/share/pirate-garmin/
+```
 
 ## Commands
 

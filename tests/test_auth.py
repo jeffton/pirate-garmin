@@ -14,6 +14,7 @@ from pirate_garmin.auth import (
     NativeOAuth2Session,
     NativeTokenSlot,
     OAuth2Token,
+    default_app_dir,
 )
 from pirate_garmin.browser_login import FreshLoginResult
 from pirate_garmin.client import GarminClient
@@ -67,6 +68,20 @@ def test_native_login_bootstrap_saves_di_and_it_tokens(httpx_mock, monkeypatch, 
     assert session.di.client_id == "GARMIN_CONNECT_MOBILE_ANDROID_DI_2025Q2"
     assert session.it.client_id == "GARMIN_CONNECT_MOBILE_ANDROID_2025Q2"
     assert manager.native_oauth2_path.exists()
+
+
+def test_default_app_dir_prefers_xdg_data_home(monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    monkeypatch.delenv("PIRATE_GARMIN_APP_DIR", raising=False)
+
+    assert default_app_dir() == tmp_path / "xdg-data" / "pirate-garmin"
+
+
+def test_default_app_dir_can_be_overridden(monkeypatch, tmp_path):
+    monkeypatch.setenv("PIRATE_GARMIN_APP_DIR", str(tmp_path / "custom-cache"))
+    monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+
+    assert default_app_dir() == tmp_path / "custom-cache"
 
 
 def test_refresh_connectapi_token_after_401(httpx_mock, tmp_path):
