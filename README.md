@@ -204,6 +204,10 @@ These are currently registered:
 
 `display_name` path placeholders are auto-filled from the cached Garmin profile.
 
+## Acknowledgements
+
+Big thanks to [garth](https://github.com/matin/garth) and [python-garminconnect](https://github.com/cyberjunky/python-garminconnect) for indexing the Garmin Connect endpoints and leading the way.
+
 ## Development
 
 ```bash
